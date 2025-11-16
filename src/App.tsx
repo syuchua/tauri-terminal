@@ -34,6 +34,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { openConnectionFormModal } from "./features/connections/components/ConnectionFormModal";
 import { useConnectionsQuery } from "./features/connections/hooks/useConnectionsQuery";
+import { openConnectionPasswordModal } from "./features/sessions/components/ConnectionPasswordModal";
 import { useSessionsQuery } from "./features/sessions/hooks/useSessionsQuery";
 import { openExportConfModal } from "./features/sync/components/ExportConfModal";
 import { openImportConfModal } from "./features/sync/components/ImportConfModal";
@@ -41,28 +42,16 @@ import { TerminalView } from "./features/terminal/components/TerminalView";
 import { createConnection } from "./services/connections";
 import { exportEncryptedConf, importEncryptedConf } from "./services/sync";
 import { isTauri } from "./services/tauriBridge";
-import { runLocalCommand } from "./services/terminal";
 import type { Connection } from "./shared/types";
+import { useConnectionSecretsStore } from "./store/connectionSecretsStore";
 import { useConnectionsStore } from "./store/connectionsStore";
 import { useSessionsStore } from "./store/sessionsStore";
 import "./App.css";
 
-const sessionLog = `idriver@nebula ➜ ssh prod-api-01
-Authorized keys loaded from agent ✓
-Connecting to 10.21.20.8:22 ... connected
-┌─ PROD / api 1.24.3
-│  uptime        18 days 04:12:47
-│  load average  0.83  0.92  0.78
-│  cpu           47%   mem 63%
-└──────────────────────────────────
-$ pm2 ls
-┌────┬──────────────────┬───────┬──────┬────────┬────────┬────────┐
-│ id │ name             │ mode  │ ↺    │ status │ cpu    │ mem    │
-├────┼──────────────────┼───────┼──────┼────────┼────────┼────────┤
-│ 12 │ api-gateway      │ fork  │ 0    │ online │ 52%    │ 820 MB │
-│ 14 │ websocket-entry  │ fork  │ 1    │ online │ 38%    │ 612 MB │
-└────┴──────────────────┴───────┴──────┴────────┴────────┴────────┘
-`;
+const fallbackLines = [
+  "tauri-terminal 当前运行在浏览器预览模式。",
+  "请执行 `npm run tauri dev` 或运行打包应用以获得真实会话。",
+];
 
 type ConnectionCardProps = {
   connection: Connection;
@@ -119,12 +108,21 @@ function App() {
   const selectConnection = useConnectionsStore((state) => state.selectConnection);
   const sessions = useSessionsStore((state) => state.items);
   const addLocalConnection = useConnectionsStore((state) => state.addLocalConnection);
+  const connectionSecrets = useConnectionSecretsStore((state) => state.secrets);
+  const setConnectionSecret = useConnectionSecretsStore((state) => state.setSecret);
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
-  const [terminalLines, setTerminalLines] = useState<string[]>(() => sessionLog.split("\n"));
+  const [terminalLines, setTerminalLines] = useState<string[]>(() =>
+    isTauri ? [] : fallbackLines,
+  );
   const [commandInput, setCommandInput] = useState("");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [sessionAttempt, setSessionAttempt] = useState(0);
   const sessionRef = useRef<string | null>(null);
+  const pendingSecretRef = useRef<string | null>(null);
+  const [blockedSecretId, setBlockedSecretId] = useState<string | null>(null);
 
   const activeConnection = useMemo(() => {
     if (!connections.length) {
@@ -136,18 +134,10 @@ function App() {
   }, [connections, selectedId]);
 
   useEffect(() => {
-    if (!activeConnection) {
-      setTerminalLines(sessionLog.split("\n"));
-      return;
+    if (activeConnection) {
+      setBlockedSecretId(null);
     }
-
-    setTerminalLines([
-      `ssh ${activeConnection.username}@${activeConnection.host}`,
-      `Connected to ${activeConnection.name} (${activeConnection.protocol.toUpperCase()}):${activeConnection.port}`,
-      `$ uptime`,
-      `22:41:03 up 3 days, load average: 0.24, 0.35, 0.43`,
-    ]);
-  }, [activeConnection]);
+  }, [activeConnection, setBlockedSecretId]);
 
   const handleExportConf = () => {
     openExportConfModal(async (options) => {
@@ -201,22 +191,60 @@ function App() {
     });
   };
 
+  const secretForActive =
+    activeConnection && connectionSecrets[activeConnection.id]
+      ? connectionSecrets[activeConnection.id]
+      : undefined;
+
   useEffect(() => {
     if (!isTauri) {
       sessionRef.current = null;
-      setTerminalLines(sessionLog.split("\n"));
+      setTerminalLines(fallbackLines);
+      setConnectionError(null);
+      setIsConnecting(false);
+      return;
+    }
+
+    if (
+      activeConnection &&
+      activeConnection.protocol === "ssh" &&
+      !secretForActive
+    ) {
+      if (
+        blockedSecretId === activeConnection.id ||
+        pendingSecretRef.current === activeConnection.id
+      ) {
+        setIsConnecting(false);
+        return;
+      }
+      pendingSecretRef.current = activeConnection.id;
+      openConnectionPasswordModal(activeConnection, {
+        onSubmit: (password) => {
+          pendingSecretRef.current = null;
+          setConnectionSecret(activeConnection.id, password);
+        },
+        onCancel: () => {
+          pendingSecretRef.current = null;
+          setBlockedSecretId(activeConnection.id);
+          setTerminalLines(["已取消连接"]);
+          setIsConnecting(false);
+        },
+      });
       return;
     }
 
     let aborted = false;
     const start = async () => {
+      setIsConnecting(true);
+      setConnectionError(null);
       if (sessionRef.current) {
         await invoke("close_shell_session", { sessionId: sessionRef.current }).catch(() => {});
         sessionRef.current = null;
       }
 
       if (!activeConnection) {
-        setTerminalLines(sessionLog.split("\n"));
+        setTerminalLines(["请选择左侧的连接以启动会话"]);
+        setIsConnecting(false);
         return;
       }
 
@@ -224,6 +252,7 @@ function App() {
         setTerminalLines([]);
         const newId = await invoke<string>("create_shell_session", {
           connectionId: activeConnection.id,
+          secret: secretForActive ? { password: secretForActive } : null,
         });
         if (aborted) {
           await invoke("close_shell_session", { sessionId: newId }).catch(() => {});
@@ -233,6 +262,11 @@ function App() {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         notifications.show({ color: "red", title: "会话启动失败", message });
+        setConnectionError(message);
+      } finally {
+        if (!aborted) {
+          setIsConnecting(false);
+        }
       }
     };
 
@@ -240,29 +274,59 @@ function App() {
 
     return () => {
       aborted = true;
+      setIsConnecting(false);
     };
-  }, [activeConnection]);
+  }, [
+    activeConnection,
+    blockedSecretId,
+    secretForActive,
+    setBlockedSecretId,
+    setConnectionSecret,
+    setTerminalLines,
+    sessionAttempt,
+    setConnectionError,
+    setIsConnecting,
+  ]);
 
   useEffect(() => {
     if (!isTauri) return;
-    let unlisten: UnlistenFn | undefined;
+    let unlistenData: UnlistenFn | undefined;
+    let unlistenClose: UnlistenFn | undefined;
     const setup = async () => {
-      unlisten = await listen<{ session_id: string; stream: string; data: string }>(
+      unlistenData = await listen<{ session_id: string; stream: string; data: string }>(
         "session-data",
         ({ payload }) => {
           if (sessionRef.current && payload.session_id === sessionRef.current) {
             setTerminalLines((lines) => [...lines, payload.data]);
+            if (
+              payload.stream === "stderr" &&
+              payload.data.startsWith("SSH 会话错误")
+            ) {
+              setConnectionError(payload.data);
+              setIsConnecting(false);
+            }
           }
         },
       );
+      unlistenClose = await listen<{ session_id: string }>("session-closed", ({ payload }) => {
+        if (sessionRef.current && payload.session_id === sessionRef.current) {
+          setTerminalLines((lines) => [...lines, "会话已结束"]);
+          sessionRef.current = null;
+          setConnectionError("会话已结束");
+          setIsConnecting(false);
+        }
+      });
     };
     void setup();
     return () => {
-      if (unlisten) {
-        unlisten();
+      if (unlistenData) {
+        unlistenData();
+      }
+      if (unlistenClose) {
+        unlistenClose();
       }
     };
-  }, []);
+  }, [setConnectionError, setIsConnecting]);
 
   useEffect(() => () => {
     if (sessionRef.current) {
@@ -312,13 +376,15 @@ function App() {
       return;
     }
 
-    try {
-      const result = await runLocalCommand(input, activeConnection?.id);
-      setTerminalLines((lines) => [...lines, result]);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setTerminalLines((lines) => [...lines, `命令失败: ${message}`]);
-    }
+    setTerminalLines((lines) => [
+      ...lines,
+      "当前为浏览器预览模式，无法执行真实命令。",
+    ]);
+  };
+
+  const handleReconnect = () => {
+    if (!isTauri) return;
+    setSessionAttempt((value) => value + 1);
   };
 
   return (
@@ -448,9 +514,22 @@ function App() {
                   <Badge size="xs" variant="light" color="plasma">
                     SFTP mounted
                   </Badge>
+                  <Button
+                    size="xs"
+                    variant="light"
+                    onClick={handleReconnect}
+                    disabled={!isTauri || isConnecting}
+                  >
+                    {isConnecting ? "连接中..." : "重连"}
+                  </Button>
                 </Group>
               </div>
               <TerminalView lines={terminalLines} />
+              {connectionError ? (
+                <Text size="sm" c="red" mt="sm">
+                  {connectionError}
+                </Text>
+              ) : null}
               <Group mt="md" gap="sm">
                 <TextInput
                   flex={1}

@@ -11,6 +11,8 @@ RUN apt update && apt install -y \
     wget \
     git \
     pkg-config \
+    xdg-utils \
+    libssl-dev \
     libgtk-3-dev \
     libgtk-4-dev \
     libglib2.0-dev \
@@ -19,7 +21,21 @@ RUN apt update && apt install -y \
     librsvg2-dev \
     libwebkit2gtk-4.1-dev \
     libjavascriptcoregtk-4.1-dev \
+    libnss3 \
+    libasound2 \
+    libx11-xcb-dev \
+    libxkbcommon-dev \
+    libxrandr-dev \
+    libxcb1-dev \
+    libxi6 \
+    libxtst6 \
     ca-certificates \
+    dbus-x11 \
+    xauth \
+    x11-apps \
+    xfce4 \
+    xfce4-terminal \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 20

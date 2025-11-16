@@ -1,0 +1,34 @@
+services:
+  tauri-dev:
+    command: ["tail", "-f", "/dev/null"]
+    tty: true
+    stdin_open: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tauri-terminal-dev
+    ports:
+      - "1420:1420"
+    working_dir: /workspace
+    environment:
+      DISPLAY: "${DISPLAY}"
+      WAYLAND_DISPLAY: "${WAYLAND_DISPLAY:-}"
+      XAUTHORITY: "${XAUTHORITY:-/root/.Xauthority}"
+      http_proxy: "http://host.docker.internal:7890"
+      https_proxy: "http://host.docker.internal:7890"
+      no_proxy: "${no_proxy:-127.0.0.1,localhost}"
+    volumes:
+      - .:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - tauri_cargo_cache:/root/.cargo
+      - tauri_npm_cache:/root/.npm
+    devices:
+      - /dev/dri:/dev/dri
+    ipc: host
+    network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  tauri_cargo_cache:
+  tauri_npm_cache:

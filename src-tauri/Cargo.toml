@@ -37,3 +37,5 @@ base64 = "0.21"
 uuid = { version = "1", features = ["v4", "fast-rng", "serde"] }
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread"] }
 rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
+ssh2 = "0.9"
+crossbeam-channel = "0.5"
