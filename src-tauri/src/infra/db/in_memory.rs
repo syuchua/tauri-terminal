@@ -20,6 +20,15 @@ impl ConnectionRepository for InMemoryConnectionRepository {
         CONNECTIONS.lock().unwrap().insert(0, connection.clone());
         Ok(connection)
     }
+
+    fn get(&self, id: &str) -> Result<Option<Connection>> {
+        Ok(CONNECTIONS
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|conn| conn.id == id)
+            .cloned())
+    }
 }
 
 fn default_connections() -> Vec<Connection> {

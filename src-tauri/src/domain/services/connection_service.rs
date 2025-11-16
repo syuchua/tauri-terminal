@@ -9,6 +9,7 @@ use crate::domain::models::{AuthType, Connection, ConnectionHealth, Protocol};
 pub trait ConnectionRepository: Send + Sync {
     fn list(&self) -> Result<Vec<Connection>>;
     fn create(&self, connection: Connection) -> Result<Connection>;
+    fn get(&self, id: &str) -> Result<Option<Connection>>;
 }
 
 #[derive(Clone)]
@@ -51,6 +52,10 @@ impl ConnectionService {
             last_connected_at: None,
         };
         self.repo.create(connection)
+    }
+
+    pub fn get_connection(&self, id: &str) -> Result<Option<Connection>> {
+        self.repo.get(id)
     }
 }
 

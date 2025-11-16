@@ -23,7 +23,14 @@
 - [x] 前端导入/导出 UI（Sync overview + Import/Export Modal）
 - [x] 实现 LocalFileAdapter + AES-GCM 加密导入导出
 - [x] 新增连接表单 → Tauri create_connection 命令（暂时 InMemory）
+- [x] SessionManager 本地 shell 接入（create/send/close + session-data 事件）
+- [x] rusqlite 落地 connections.sqlite3 并替换 InMemory 仓储
+- [x] SessionManager 根据协议调用系统 ssh（前端 xterm 通过 session-data 渲染）
 - [ ] CloudFolder/WebDAV 适配器 + 真正写入 SQLite/Keychain
-- [ ] 终端真正连接 SSH SessionManager
-- [ ] 规划SessionManager 的 Rust ↔ React 事件管道，让终端换成真实连接，而不是本地 shell
-- [ ] 在 Docker 环境里跑 npm run tauri build（避免 glib 版本问题）
+- [ ] SessionManager 使用 ssh2/sftp 客户端，替换系统 ssh
+- [ ] Docker 环境 `npm run tauri build`（解决 glib/webkit 依赖）
+- [ ] SyncService 导入/导出真实 SQLite/Keychain 数据，而非 manifest 占位
+
+## Terminal & Session UI
+- [ ] 多 Session 标签/分屏以及 session 状态管理
+- [ ] SessionManager 退出/错误事件与前端 store 同步（自动重连、提示）

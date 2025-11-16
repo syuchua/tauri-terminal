@@ -1,6 +1,6 @@
 # tauri-terminal 架构与工程蓝图
 
-最后更新：2025-11-15
+最后更新：2025-11-16
 
 ---
 
@@ -163,10 +163,9 @@ src/
 
 - Shell（已初版）：Mantine `AppShell` + `Navbar` + `Header` + `Main`，已经搭出 Acrylic 终端示例。
 - Connections 面板：`ScrollArea` + `Card` + `TextInput` + `Button`，未来替换为真实数据和树/标签控件。
-  - 当前已支持通过 `ConnectionFormModal` 新增连接（名称/主机/协议/端口/用户名），按钮位于左侧面板的搜索框下方，创建后立刻写入 Zustand store（未来接入 SQLite/Tauri 命令）。
-  - 现在表单会调用 Tauri `create_connection` 命令：在 Rust 端通过 `ConnectionService::create_connection` 写入 InMemory Repository（将来替换为 SQLite）。Web 端 fallback 则只更新本地 store，方便在浏览器环境下预览 UI。
-- Terminal 区域：`Box` + `pre` 先展示伪输出，后续替换为 `xterm.js`，Acrylic 背景和 toolbar 复用 CSS。
-  - Terminal 区域：现在使用 `xterm.js + fit addon` 初始化一个可交互的终端实例，默认渲染虚拟日志。下一步可以把 Tauri session 数据流映射到 `xterm.write()`，并在输入时通过命令管道发回 Rust SessionManager。
+  - 当前已支持通过 `ConnectionFormModal` 新增连接（名称/主机/协议/端口/用户名），按钮位于左侧面板的搜索框下方。
+  - 在桌面端，表单会调用 Tauri `create_connection` 命令：Rust 端使用 rusqlite 将记录写入 `connections.sqlite3`，随后前端 `refetch` 列表；浏览器环境下仍 fallback 到 local store，方便预览 UI。
+- Terminal 区域：现在使用 `xterm.js + fit addon` 初始化一个可交互的终端实例，并通过 Tauri 命令 `create_shell_session/send_session_input` 与 Rust SessionManager 交互。SessionManager 会根据连接协议决定启动本地 shell 或系统 `ssh user@host -p PORT`，通过 `session-data` 事件推送 stdout/stderr，前端只保留当前 session 的输出。下一步可以在 SessionManager 内替换为真正的 SSH/SFTP 客户端，避免依赖系统 `ssh`。
 - 概览卡片：`Card` + `Badge` + `Flex` 显示 Session 数、同步状态等。
 
 ### 5.5 设计模式
@@ -197,43 +196,40 @@ src-tauri/src/
       session_service.rs
       sync_service.rs
   infra/
-    db.rs                      # SQLite + 迁移
-    keychain.rs                # 系统 Keychain 适配
-    ssh_client.rs
-    ftp_client.rs
-    config.rs                  # App 配置
+    db/
+      sqlite.rs               # rusqlite Connections 仓储
+      in_memory.rs            # 测试用
+    storage/
+      local.rs                # LocalFileAdapter（导入导出 conf）
+    session/
+      mod.rs                  # SessionManager（本地 shell/ssh）
+    keychain.rs               # 系统 Keychain 适配
   telemetry/
     logging.rs                 # 结构化日志 + 脱敏
 ```
 
-> 运行态：新增 `app_state.rs` 作为统一入口，Tauri 启动时创建 `ConnectionService` / `SessionService` 并通过 `.manage(AppState)` 注入。当前阶段 `infra/db/in_memory.rs` 暂时代替仓储，未来迁移到 SQLite + Keychain 时仅需更换实现即可。
+> 运行态：`app_state.rs` 在 `Builder::setup` 中初始化 AppState，确定 app data 目录、创建 `connections.sqlite3` 并注入 Connection/Session/Sync/SessionManager 等服务。
 
 ### 6.2 Session Manager
 
 ```rust
-pub struct SessionHandle {
-    pub id: String,
-    pub connection_id: String,
-    pub tx_stdin: tokio::sync::mpsc::Sender<Vec<u8>>,
-    pub close_tx: tokio::sync::oneshot::Sender<()>,
-}
-
 pub struct SessionManager {
-    sessions: dashmap::DashMap<String, SessionHandle>,
+    sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
 }
 ```
+当前实现：
 
-流程：
-1. `create_session`：从 DB 读取 Connection + Credential → 根据协议创建客户端 → 启动 Tokio 任务转发 stdout/stderr 到 `window.emit("session-data", ..)`。
-2. `send_input`：通过 `tx_stdin` 写入远端。
-3. `close_session`：发送关闭信号、清理 `sessions` 表、推送 `session-closed` 事件。
-4. 错误通过 `Result` 冒泡，UI 获得可序列化错误信息。
+1. `create_shell_session` 会根据连接协议选择：
+   - `ssh`/`sftp` → 直接调用系统 `ssh user@host -p PORT`，暂时沿用用户的 SSH Agent/配置；
+   - 其它协议或无连接 → 启动 `/bin/sh -i` 或 `cmd /K`，作为本地 shell 占位。
+2. `session-data` 事件实时推送 stdout/stderr，前端按 session id 过滤写入 xterm；
+3. `send_session_input` 将输入写入 stdin，`close_shell_session` 负责清理；
+4. 后续可替换为基于 `ssh2`/`tokio` 的实现，支持更丰富的 SSH/SFTP 能力。
 
 ### 6.3 存储与迁移
 
-- SQLite 表：`connections` / `groups` / `credentials` / `settings` / `sync_state`。
-- 所有表含 `created_at`, `updated_at`, `version` 字段，为同步与冲突准备。
-- 迁移方案：简单 `migrations/0001_init.sql` → CLI 启动时读取 `schema_version` 表执行补全。
+- 当前已落地 `connections.sqlite3`：`rusqlite` 管理 `connections` 表，`create_connection/list_connections` 命令都直接读写该表。
+- 其它表（groups/credentials/settings/sync_state）后续可逐步迁移，迁移脚本可通过 `rusqlite` 执行 `CREATE TABLE IF NOT EXISTS` + `schema_version` 表维护。
 
 ### 6.4 凭据与安全
 

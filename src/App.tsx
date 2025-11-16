@@ -28,7 +28,9 @@ import {
   IconSun,
   IconTerminal2,
 } from "@tabler/icons-react";
-import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { openConnectionFormModal } from "./features/connections/components/ConnectionFormModal";
 import { useConnectionsQuery } from "./features/connections/hooks/useConnectionsQuery";
@@ -122,6 +124,7 @@ function App() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [terminalLines, setTerminalLines] = useState<string[]>(() => sessionLog.split("\n"));
   const [commandInput, setCommandInput] = useState("");
+  const sessionRef = useRef<string | null>(null);
 
   const activeConnection = useMemo(() => {
     if (!connections.length) {
@@ -198,6 +201,75 @@ function App() {
     });
   };
 
+  useEffect(() => {
+    if (!isTauri) {
+      sessionRef.current = null;
+      setTerminalLines(sessionLog.split("\n"));
+      return;
+    }
+
+    let aborted = false;
+    const start = async () => {
+      if (sessionRef.current) {
+        await invoke("close_shell_session", { sessionId: sessionRef.current }).catch(() => {});
+        sessionRef.current = null;
+      }
+
+      if (!activeConnection) {
+        setTerminalLines(sessionLog.split("\n"));
+        return;
+      }
+
+      try {
+        setTerminalLines([]);
+        const newId = await invoke<string>("create_shell_session", {
+          connectionId: activeConnection.id,
+        });
+        if (aborted) {
+          await invoke("close_shell_session", { sessionId: newId }).catch(() => {});
+          return;
+        }
+        sessionRef.current = newId;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        notifications.show({ color: "red", title: "会话启动失败", message });
+      }
+    };
+
+    void start();
+
+    return () => {
+      aborted = true;
+    };
+  }, [activeConnection]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: UnlistenFn | undefined;
+    const setup = async () => {
+      unlisten = await listen<{ session_id: string; stream: string; data: string }>(
+        "session-data",
+        ({ payload }) => {
+          if (sessionRef.current && payload.session_id === sessionRef.current) {
+            setTerminalLines((lines) => [...lines, payload.data]);
+          }
+        },
+      );
+    };
+    void setup();
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => () => {
+    if (sessionRef.current) {
+      void invoke("close_shell_session", { sessionId: sessionRef.current }).catch(() => {});
+    }
+  }, []);
+
   const handleAddConnection = () => {
     openConnectionFormModal(async (payload) => {
       try {
@@ -228,6 +300,17 @@ function App() {
     if (!input) return;
     setCommandInput("");
     setTerminalLines((lines) => [...lines, `$ ${input}`]);
+
+    if (isTauri && sessionRef.current) {
+      await invoke("send_session_input", {
+        sessionId: sessionRef.current,
+        data: `${input}\n`,
+      }).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setTerminalLines((lines) => [...lines, `命令失败: ${message}`]);
+      });
+      return;
+    }
 
     try {
       const result = await runLocalCommand(input, activeConnection?.id);

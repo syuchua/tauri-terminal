@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,6 +9,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use tar::{Archive, Builder, Header};
+use thiserror::Error;
 use tracing::info;
 
 use crate::infra::crypto::{self, EncryptedBlob};
@@ -22,16 +23,6 @@ pub enum ExportStrategy {
 pub enum UnlockStrategy {
     MasterPassword(String),
     Keychain,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum SyncError {
-    #[error("需要提供主密码或启用 Keychain")]
-    MissingMasterPassword,
-    #[error("Keychain 解锁尚未实现")]
-    KeychainUnavailable,
-    #[error("archive 缺少 manifest.json")]
-    MissingManifest,
 }
 
 #[derive(Clone)]
@@ -83,9 +74,9 @@ impl SyncService {
 struct Manifest {
     version: u32,
     generated_at: String,
-    strategy: &'static str,
+    strategy: String,
     include_credentials: bool,
-    note: &'static str,
+    note: String,
 }
 
 fn build_archive(strategy: &ExportStrategy) -> Result<Vec<u8>> {
@@ -96,9 +87,9 @@ fn build_archive(strategy: &ExportStrategy) -> Result<Vec<u8>> {
     let manifest = Manifest {
         version: 1,
         generated_at: Utc::now().to_rfc3339(),
-        strategy: strategy_label(strategy),
+        strategy: strategy_label(strategy).to_string(),
         include_credentials: matches!(strategy, ExportStrategy::Full),
-        note: "placeholder manifest; real data integration pending",
+        note: "placeholder manifest; real data integration pending".to_string(),
     };
 
     append_file(
@@ -138,8 +129,8 @@ fn extract_manifest(archive: &[u8]) -> Result<Manifest> {
         if path == PathBuf::from("manifest.json") {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
-            let manifest: Manifest = serde_json::from_slice(&buf)?;
-            return Ok(manifest);
+            return serde_json::from_slice(&buf)
+                .map_err(|err| anyhow!("manifest parse failed: {err}"));
         }
     }
     Err(SyncError::MissingManifest.into())
@@ -165,4 +156,14 @@ fn unlock_label(unlock: &UnlockStrategy) -> &'static str {
         UnlockStrategy::MasterPassword(_) => "master_password",
         UnlockStrategy::Keychain => "keychain",
     }
+}
+
+#[derive(Debug, Error)]
+pub enum SyncError {
+    #[error("manifest.json 缺失")]
+    MissingManifest,
+    #[error("主密码不能为空")]
+    MissingMasterPassword,
+    #[error("Keychain 模式暂不可用")]
+    KeychainUnavailable,
 }

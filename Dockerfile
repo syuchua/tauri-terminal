@@ -17,6 +17,8 @@ RUN apt update && apt install -y \
     libgtksourceview-5-dev \
     libayatana-appindicator3-dev \
     librsvg2-dev \
+    libwebkit2gtk-4.1-dev \
+    libjavascriptcoregtk-4.1-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,8 +28,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     npm install -g npm@latest
 
 # Install Rust toolchain
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
-ENV PATH="/root/.cargo/bin:$PATH"
+ENV RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+ENV RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+RUN curl https://mirrors.ustc.edu.cn/rust-static/rustup/rustup-init.sh -sSf \
+        | sh -s -- -y --profile minimal \
+   && echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /root/.bashrc
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 
 WORKDIR /workspace
 
@@ -35,4 +42,4 @@ COPY . /workspace
 
 RUN npm install --registry=https://registry.npmmirror.com
 
-CMD ["npm", "run", "tauri", "build"]
+CMD ["/bin/bash"]
