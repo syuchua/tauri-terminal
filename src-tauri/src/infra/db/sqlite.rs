@@ -117,6 +117,28 @@ impl ConnectionRepository for SqliteConnectionRepository {
         }
         Ok(None)
     }
+
+    fn update(&self, connection: DomainConnection) -> Result<DomainConnection> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE connections SET name = ?1, protocol = ?2, host = ?3, port = ?4, username = ?5 WHERE id = ?6",
+            params![
+                connection.name,
+                format_protocol(&connection.protocol),
+                connection.host,
+                connection.port,
+                connection.username,
+                connection.id,
+            ],
+        )?;
+        Ok(connection)
+    }
+
+    fn delete(&self, id: &str) -> Result<()> {
+        let conn = self.connection()?;
+        conn.execute("DELETE FROM connections WHERE id = ?1", params![id])?;
+        Ok(())
+    }
 }
 
 fn format_protocol(protocol: &Protocol) -> &'static str {

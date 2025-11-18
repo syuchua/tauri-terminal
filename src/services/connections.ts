@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { invokeOrFallback, isTauri } from "./tauriBridge";
-import type { Connection, NewConnectionPayload } from "../shared/types";
+import type { Connection, NewConnectionPayload, UpdateConnectionPayload } from "../shared/types";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -91,4 +91,27 @@ export async function createConnection(payload: NewConnectionPayload): Promise<C
   };
   connectionFixtures.unshift(fallback);
   return fallback;
+}
+
+export async function updateConnection(payload: UpdateConnectionPayload): Promise<Connection> {
+  if (isTauri) {
+    return invoke<Connection>("update_connection", { payload });
+  }
+  const idx = connectionFixtures.findIndex((item) => item.id === payload.id);
+  if (idx >= 0) {
+    connectionFixtures[idx] = { ...connectionFixtures[idx], ...payload };
+    return connectionFixtures[idx];
+  }
+  throw new Error("连接不存在（mock 环境）");
+}
+
+export async function deleteConnection(id: string): Promise<void> {
+  if (isTauri) {
+    await invoke("delete_connection", { id });
+    return;
+  }
+  const idx = connectionFixtures.findIndex((item) => item.id === id);
+  if (idx >= 0) {
+    connectionFixtures.splice(idx, 1);
+  }
 }

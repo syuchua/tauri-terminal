@@ -18,6 +18,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd::connections::list_connections,
             cmd::connections::create_connection,
+            cmd::connections::update_connection,
+            cmd::connections::delete_connection,
             cmd::sessions::list_session_summaries,
             cmd::sessions::create_shell_session,
             cmd::sessions::send_session_input,

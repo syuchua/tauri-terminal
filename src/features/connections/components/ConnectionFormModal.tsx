@@ -15,6 +15,9 @@ import type { Connection, NewConnectionPayload } from "../../../shared/types";
 interface ConnectionFormModalProps {
   modalId: string;
   onSubmit: (payload: NewConnectionPayload) => Promise<void> | void;
+  initial?: NewConnectionPayload;
+  title?: string;
+  submitLabel?: string;
 }
 
 const protocolOptions: { label: string; value: Connection["protocol"]; port: number }[] = [
@@ -23,14 +26,16 @@ const protocolOptions: { label: string; value: Connection["protocol"]; port: num
   { label: "FTP", value: "ftp", port: 21 },
 ];
 
-const ConnectionFormModalContent = ({ modalId, onSubmit }: ConnectionFormModalProps) => {
-  const [payload, setPayload] = useState<NewConnectionPayload>({
-    name: "",
-    host: "",
-    username: "",
-    protocol: "ssh",
-    port: 22,
-  });
+const ConnectionFormModalContent = ({ modalId, onSubmit, initial, submitLabel }: ConnectionFormModalProps) => {
+  const [payload, setPayload] = useState<NewConnectionPayload>(
+    initial ?? {
+      name: "",
+      host: "",
+      username: "",
+      protocol: "ssh",
+      port: 22,
+    },
+  );
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -105,7 +110,7 @@ const ConnectionFormModalContent = ({ modalId, onSubmit }: ConnectionFormModalPr
           取消
         </Button>
         <Button loading={loading} onClick={() => void handleSubmit()}>
-          保存连接
+          {submitLabel ?? "保存连接"}
         </Button>
       </Group>
     </Stack>
@@ -114,13 +119,22 @@ const ConnectionFormModalContent = ({ modalId, onSubmit }: ConnectionFormModalPr
 
 export const openConnectionFormModal = (
   onSubmit: (payload: NewConnectionPayload) => Promise<void> | void,
+  options?: { initial?: NewConnectionPayload; title?: string; submitLabel?: string },
 ) => {
   const modalId = `connection-form-${Date.now()}`;
   modals.open({
     modalId,
-    title: "新增连接",
+    title: options?.title ?? "新增连接",
     centered: true,
     withCloseButton: false,
-    children: <ConnectionFormModalContent modalId={modalId} onSubmit={onSubmit} />,
+    children: (
+      <ConnectionFormModalContent
+        modalId={modalId}
+        onSubmit={onSubmit}
+        initial={options?.initial}
+        title={options?.title}
+        submitLabel={options?.submitLabel}
+      />
+    ),
   });
 };

@@ -36,3 +36,7 @@ export interface NewConnectionPayload {
   protocol: Protocol;
   port: number;
 }
+
+export interface UpdateConnectionPayload extends NewConnectionPayload {
+  id: string;
+}

@@ -15,11 +15,13 @@ import {
   useComputedColorScheme,
   useMantineColorScheme,
 } from "@mantine/core";
+import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import {
   IconArrowUpRight,
   IconCloudUpload,
   IconDots,
+  IconEdit,
   IconMoon,
   IconPlugConnected,
   IconPlus,
@@ -27,6 +29,7 @@ import {
   IconServer,
   IconSun,
   IconTerminal2,
+  IconTrash,
 } from "@tabler/icons-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -39,7 +42,7 @@ import { useSessionsQuery } from "./features/sessions/hooks/useSessionsQuery";
 import { openExportConfModal } from "./features/sync/components/ExportConfModal";
 import { openImportConfModal } from "./features/sync/components/ImportConfModal";
 import { TerminalView } from "./features/terminal/components/TerminalView";
-import { createConnection } from "./services/connections";
+import { createConnection, deleteConnection, updateConnection } from "./services/connections";
 import { exportEncryptedConf, importEncryptedConf } from "./services/sync";
 import { isTauri } from "./services/tauriBridge";
 import type { Connection } from "./shared/types";
@@ -57,9 +60,11 @@ type ConnectionCardProps = {
   connection: Connection;
   isActive: boolean;
   onSelect: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
 };
 
-const ConnectionCard = ({ connection, isActive, onSelect }: ConnectionCardProps) => (
+const ConnectionCard = ({ connection, isActive, onSelect, onEdit, onDelete }: ConnectionCardProps) => (
   <Card
     withBorder
     padding="md"
@@ -75,9 +80,29 @@ const ConnectionCard = ({ connection, isActive, onSelect }: ConnectionCardProps)
           {connection.host} • {connection.groupName ?? "Ungrouped"}
         </Text>
       </Stack>
-      <Badge variant="light" size="sm" color={connection.status === "healthy" ? "teal" : "grape"}>
-        {connection.status}
-      </Badge>
+      <Group gap="xs">
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          onClick={(event) => {
+            event.stopPropagation();
+            onEdit();
+          }}
+        >
+          <IconEdit size={14} />
+        </ActionIcon>
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color="red"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete();
+          }}
+        >
+          <IconTrash size={14} />
+        </ActionIcon>
+      </Group>
     </Group>
   </Card>
 );
@@ -382,6 +407,62 @@ function App() {
     ]);
   };
 
+  const handleEditConnection = (connection: Connection) => {
+    openConnectionFormModal(
+      async (payload) => {
+        try {
+          await updateConnection({ id: connection.id, ...payload });
+          await connectionsQuery.refetch();
+          notifications.show({
+            color: "teal",
+            title: "连接已更新",
+            message: `${payload.name} (${payload.host})`,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          notifications.show({ color: "red", title: "更新失败", message });
+        }
+      },
+      {
+        initial: {
+          name: connection.name,
+          host: connection.host,
+          username: connection.username,
+          protocol: connection.protocol,
+          port: connection.port,
+        },
+        title: "编辑连接",
+        submitLabel: "保存修改",
+      },
+    );
+  };
+
+  const handleDeleteConnection = (connection: Connection) => {
+    modals.openConfirmModal({
+      title: `删除 ${connection.name}`,
+      children: <Text size="sm">确定要删除此连接吗？该操作不可恢复。</Text>,
+      labels: { confirm: "删除", cancel: "取消" },
+      confirmProps: { color: "red" },
+      centered: true,
+      onConfirm: () => {
+        void (async () => {
+          try {
+            await deleteConnection(connection.id);
+            await connectionsQuery.refetch();
+            notifications.show({
+              color: "teal",
+              title: "连接已删除",
+              message: connection.name,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            notifications.show({ color: "red", title: "删除失败", message });
+          }
+        })();
+      },
+    });
+  };
+
   const handleReconnect = () => {
     if (!isTauri) return;
     setSessionAttempt((value) => value + 1);
@@ -458,6 +539,8 @@ function App() {
                   connection={connection}
                   isActive={connection.id === activeConnection?.id}
                   onSelect={() => selectConnection(connection.id)}
+                  onEdit={() => handleEditConnection(connection)}
+                  onDelete={() => handleDeleteConnection(connection)}
                 />
               ))}
             </Stack>
@@ -544,12 +627,12 @@ function App() {
                   }}
                 />
                 <Button
-                  onClick={() => {
-                    void handleSendCommand();
-                  }}
-                >
-                  执行
-                </Button>
+            onClick={() => {
+              void handleSendCommand();
+            }}
+          >
+            执行
+          </Button>
               </Group>
             </Box>
           </Box>

@@ -203,16 +203,23 @@ impl SessionManager {
         let mut session = SshSession::new().context("创建 SSH Session 失败")?;
         session.set_tcp_stream(tcp);
         session.handshake()?;
+        Self::emit_stream(&app_handle, &session_id, "stdout", "SSH 握手完成");
         authenticate(&mut session, &connection, secret.as_ref())?;
-        session.set_blocking(false);
+        Self::emit_stream(&app_handle, &session_id, "stdout", "SSH 认证成功");
+        session.set_blocking(true); // 设置阶段保持阻塞，避免 EAGAIN
 
         let mut channel = session.channel_session()?;
         channel.handle_extended_data(ExtendedData::Merge)?;
         channel.request_pty("xterm-256color", None, Some((80, 24, 0, 0)))?;
         channel.shell()?;
+        Self::emit_stream(&app_handle, &session_id, "stdout", "PTY 与 shell 已建立");
+        // 建立会话后切回非阻塞，方便轮询读写
+        session.set_blocking(false);
 
         let mut buffer = [0u8; 4096];
         let mut pending = String::new();
+
+        let mut closed_reason: Option<String> = None;
 
         loop {
             match channel.read(&mut buffer) {
@@ -226,11 +233,12 @@ impl SessionManager {
                     }
                 }
                 Err(err) => {
-                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                    if is_would_block(&err) {
                         thread::sleep(Duration::from_millis(12));
                         continue;
                     }
-                    return Err(anyhow!("SSH 读取失败: {err}"));
+                    closed_reason = Some(format!("read error: {err}"));
+                    break;
                 }
             }
 
@@ -240,13 +248,18 @@ impl SessionManager {
                 }
                 Ok(SessionInput::Close) => {
                     let _ = channel.close();
+                    closed_reason.get_or_insert_with(|| "用户主动关闭".into());
                     return Ok(());
                 }
-                Err(TryRecvError::Disconnected) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    closed_reason.get_or_insert_with(|| "会话通道已断开".into());
+                    break;
+                }
                 Err(TryRecvError::Empty) => {}
             }
 
             if channel.eof() {
+                closed_reason.get_or_insert_with(|| "远端已关闭连接".into());
                 break;
             }
             thread::sleep(Duration::from_millis(12));
@@ -257,6 +270,14 @@ impl SessionManager {
         }
 
         let _ = channel.close();
+        if let Some(reason) = closed_reason {
+            Self::emit_stream(
+                &app_handle,
+                &session_id,
+                "stderr",
+                &format!("SSH 会话结束: {reason}"),
+            );
+        }
         Ok(())
     }
 
@@ -314,7 +335,7 @@ fn write_channel(channel: &mut SshChannel, data: &str) -> Result<()> {
                 remaining = &remaining[written..];
             }
             Err(err) => {
-                if err.kind() == std::io::ErrorKind::WouldBlock {
+                if is_would_block(&err) {
                     thread::sleep(Duration::from_millis(12));
                     continue;
                 }
@@ -327,7 +348,7 @@ fn write_channel(channel: &mut SshChannel, data: &str) -> Result<()> {
         match channel.flush() {
             Ok(_) => break,
             Err(err) => {
-                if err.kind() == std::io::ErrorKind::WouldBlock {
+                if is_would_block(&err) {
                     thread::sleep(Duration::from_millis(12));
                     continue;
                 }
@@ -336,6 +357,10 @@ fn write_channel(channel: &mut SshChannel, data: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_would_block(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::WouldBlock || err.to_string().contains("Would block")
 }
 
 fn authenticate(

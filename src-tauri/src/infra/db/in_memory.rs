@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
@@ -28,6 +28,27 @@ impl ConnectionRepository for InMemoryConnectionRepository {
             .iter()
             .find(|conn| conn.id == id)
             .cloned())
+    }
+
+    fn update(&self, connection: Connection) -> Result<Connection> {
+        let mut store = CONNECTIONS.lock().unwrap();
+        if let Some(existing) = store.iter_mut().find(|conn| conn.id == connection.id) {
+            *existing = connection.clone();
+            Ok(connection)
+        } else {
+            Err(anyhow!("Connection not found"))
+        }
+    }
+
+    fn delete(&self, id: &str) -> Result<()> {
+        let mut store = CONNECTIONS.lock().unwrap();
+        let len_before = store.len();
+        store.retain(|conn| conn.id != id);
+        if store.len() == len_before {
+            Err(anyhow!("Connection not found"))
+        } else {
+            Ok(())
+        }
     }
 }
 
