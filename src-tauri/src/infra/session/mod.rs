@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
-use ssh2::{Channel as SshChannel, ExtendedData, Session as SshSession};
+use ssh2::{
+    Channel as SshChannel, Error as SshError, ErrorCode, ExtendedData, Session as SshSession,
+};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
@@ -121,7 +123,7 @@ impl SessionManager {
         let header = SessionEventPayload {
             session_id: session_id.clone(),
             stream: "stdout".into(),
-            data: "本地 shell 已启动".into(),
+            data: "本地 shell 已启动\r\n".into(),
         };
         let _ = app_handle.emit("session-data", header);
 
@@ -173,7 +175,7 @@ impl SessionManager {
             session_id: session_id.clone(),
             stream: "stdout".into(),
             data: format!(
-                "正在连接 {}@{}:{}",
+                "正在连接 {}@{}:{}\r\n",
                 connection.name, connection.host, connection.port
             ),
         };
@@ -199,46 +201,57 @@ impl SessionManager {
         let addr = format!("{}:{}", connection.host, connection.port);
         let tcp = TcpStream::connect(&addr).with_context(|| format!("连接 {addr} 失败"))?;
         tcp.set_nodelay(true).ok();
+        let tcp_control = tcp
+            .try_clone()
+            .context("克隆 TCP 流失败：无法配置非阻塞模式")?;
 
         let mut session = SshSession::new().context("创建 SSH Session 失败")?;
+        session.set_blocking(true);
         session.set_tcp_stream(tcp);
-        session.handshake()?;
-        Self::emit_stream(&app_handle, &session_id, "stdout", "SSH 握手完成");
-        authenticate(&mut session, &connection, secret.as_ref())?;
-        Self::emit_stream(&app_handle, &session_id, "stdout", "SSH 认证成功");
-        session.set_blocking(true); // 设置阶段保持阻塞，避免 EAGAIN
+        wait_for_ssh("handshake", || session.handshake())?;
+        Self::emit_stream(&app_handle, &session_id, "stdout", "SSH 握手完成\r\n");
+        authenticate(&mut session, &connection, secret.as_ref()).context("auth")?;
+        Self::emit_stream(&app_handle, &session_id, "stdout", "SSH 认证成功\r\n");
 
-        let mut channel = session.channel_session()?;
-        channel.handle_extended_data(ExtendedData::Merge)?;
-        channel.request_pty("xterm-256color", None, Some((80, 24, 0, 0)))?;
-        channel.shell()?;
-        Self::emit_stream(&app_handle, &session_id, "stdout", "PTY 与 shell 已建立");
+        let mut channel = wait_for_ssh("channel_session", || session.channel_session())?;
+        wait_for_ssh("handle_extended_data", || {
+            channel.handle_extended_data(ExtendedData::Merge)
+        })?;
+        wait_for_ssh("request_pty", || {
+            channel.request_pty("xterm-256color", None, Some((80, 24, 0, 0)))
+        })?;
+        wait_for_ssh("shell", || channel.shell())?;
+        Self::emit_stream(
+            &app_handle,
+            &session_id,
+            "stdout",
+            "PTY 与 shell 已建立\r\n",
+        );
         // 建立会话后切回非阻塞，方便轮询读写
+        tcp_control
+            .set_nonblocking(true)
+            .context("设置 SSH 套接字为非阻塞失败")?;
         session.set_blocking(false);
 
-        let mut buffer = [0u8; 4096];
-        let mut pending = String::new();
-
         let mut closed_reason: Option<String> = None;
+        let mut buffer = [0u8; 4096];
 
         loop {
+            let mut read_something = false;
             match channel.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(size) => {
-                    pending.push_str(&String::from_utf8_lossy(&buffer[..size]));
-                    while let Some(pos) = pending.find('\n') {
-                        let line = pending[..pos].trim_end_matches('\r').to_string();
-                        pending.drain(..=pos);
-                        Self::emit_stream(&app_handle, &session_id, "stdout", &line);
-                    }
+                    read_something = true;
+                    let chunk = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    Self::emit_stream(&app_handle, &session_id, "stdout", &chunk);
                 }
                 Err(err) => {
                     if is_would_block(&err) {
-                        thread::sleep(Duration::from_millis(12));
-                        continue;
+                        // allow write handling below even when没有可读数据
+                    } else {
+                        closed_reason = Some(format!("read error: {err}"));
+                        break;
                     }
-                    closed_reason = Some(format!("read error: {err}"));
-                    break;
                 }
             }
 
@@ -247,7 +260,9 @@ impl SessionManager {
                     write_channel(&mut channel, &data)?;
                 }
                 Ok(SessionInput::Close) => {
-                    let _ = channel.close();
+                    if let Err(err) = close_channel(&mut channel) {
+                        closed_reason.get_or_insert_with(|| format!("channel close error: {err}"));
+                    }
                     closed_reason.get_or_insert_with(|| "用户主动关闭".into());
                     return Ok(());
                 }
@@ -262,21 +277,17 @@ impl SessionManager {
                 closed_reason.get_or_insert_with(|| "远端已关闭连接".into());
                 break;
             }
-            thread::sleep(Duration::from_millis(12));
+            if !read_something {
+                thread::sleep(Duration::from_millis(12));
+            }
         }
 
-        if !pending.trim().is_empty() {
-            Self::emit_stream(&app_handle, &session_id, "stdout", pending.trim_end());
+        if let Err(err) = close_channel(&mut channel) {
+            closed_reason.get_or_insert_with(|| format!("channel close error: {err}"));
         }
-
-        let _ = channel.close();
         if let Some(reason) = closed_reason {
-            Self::emit_stream(
-                &app_handle,
-                &session_id,
-                "stderr",
-                &format!("SSH 会话结束: {reason}"),
-            );
+            let message = format!("SSH 会话结束: {reason}\r\n");
+            Self::emit_stream(&app_handle, &session_id, "stderr", &message);
         }
         Ok(())
     }
@@ -361,6 +372,32 @@ fn write_channel(channel: &mut SshChannel, data: &str) -> Result<()> {
 
 fn is_would_block(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::WouldBlock || err.to_string().contains("Would block")
+}
+
+fn wait_for_ssh<T, F>(label: &str, mut op: F) -> Result<T>
+where
+    F: FnMut() -> std::result::Result<T, SshError>,
+{
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(err) if is_session_would_block(&err) => {
+                thread::sleep(Duration::from_millis(12));
+                continue;
+            }
+            Err(err) => return Err(anyhow!("{label}: {err}")),
+        }
+    }
+}
+
+fn is_session_would_block(err: &SshError) -> bool {
+    matches!(err.code(), ErrorCode::Session(-37))
+}
+
+fn close_channel(channel: &mut SshChannel) -> Result<()> {
+    wait_for_ssh("channel.close", || channel.close())?;
+    wait_for_ssh("channel.wait_close", || channel.wait_close())?;
+    Ok(())
 }
 
 fn authenticate(

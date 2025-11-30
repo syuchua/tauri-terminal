@@ -3,6 +3,7 @@ import "@mantine/core/styles.css";
 import "@mantine/notifications/styles.css";
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { HashRouter } from "react-router-dom";
 
 import App from "./App";
 import { AppProviders } from "./app/providers/AppProviders";
@@ -12,7 +13,9 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ColorSchemeScript defaultColorScheme="dark" />
     <AppProviders>
-      <App />
+      <HashRouter>
+        <App />
+      </HashRouter>
     </AppProviders>
   </React.StrictMode>,
 );

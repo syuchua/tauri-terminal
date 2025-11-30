@@ -1,0 +1,10 @@
+.shell {
+  --app-shell-background-color: transparent;
+}
+
+.contentWrapper {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding-top: 1.5rem;
+  padding-bottom: 2rem;
+}

@@ -1,6 +1,6 @@
 # tauri-terminal 架构与工程蓝图
 
-最后更新：2025-11-16
+最后更新：2025-11-19
 
 ---
 
@@ -165,10 +165,22 @@ src/
 - Connections 面板：`ScrollArea` + `Card` + `TextInput` + `Button`，未来替换为真实数据和树/标签控件。
   - 当前已支持通过 `ConnectionFormModal` 新增连接（名称/主机/协议/端口/用户名），按钮位于左侧面板的搜索框下方。
   - 在桌面端，表单会调用 Tauri `create_connection` 命令：Rust 端使用 rusqlite 将记录写入 `connections.sqlite3`，随后前端 `refetch` 列表；浏览器环境下仍 fallback 到 local store，方便预览 UI。
-- Terminal 区域：现在使用 `xterm.js + fit addon` 初始化一个可交互的终端实例，并通过 Tauri 命令 `create_shell_session/send_session_input` 与 Rust SessionManager 交互。SessionManager 会根据连接协议决定启动本地 shell 或系统 `ssh user@host -p PORT`，通过 `session-data` 事件推送 stdout/stderr，前端只保留当前 session 的输出。下一步可以在 SessionManager 内替换为真正的 SSH/SFTP 客户端，避免依赖系统 `ssh`。
-- 概览卡片：`Card` + `Badge` + `Flex` 显示 Session 数、同步状态等。
+- Terminal 区域：`TerminalView` 装配 `xterm.js + fit addon` 并暴露 `write/clear/focus` 句柄。React 端不再维护字符串数组，而是把 Rust 推送的 `session-data` chunk 直接写入终端；键盘输入通过 `onData` 即时调用 `send_session_input`，因此提示符、命令回显都与原生终端一致。
+- 概览卡片：`Card` + `Badge` + `Flex` 显示 Session 数、同步状态等，后续会迁移到首页概览卡带来更清晰的信息层级。
 
-### 5.5 设计模式
+### 5.5 页面与导航规划（进行中）
+
+- **多页面信息架构**：现阶段所有内容都集中在单页面。下一步会引入轻量级路由（React Router 或 Mantine 自带导航状态），拆分为：
+  1. `Home`：默认打开的仪表盘，展示同步状态、最近活动、收藏连接、导入/导出快捷入口；不触发任何连接或密码提示。
+  2. `Workspace/Sessions`：当前的终端+连接列表迁移到该页，用户明确点击“Connect”或“打开终端”后才创建 Session/弹出密码框。
+  3. `Connections`/`Settings`：后续抽离独立面板，支持更完整的分组、凭据、主题配置。
+- **交互准则**：
+  - Session 或密码对话框只在 Workspace 中且由用户操作触发，避免首页自动弹窗。
+  - Home 页保留“最近一次连接”的概览和 CTA，点击后 navigate 到 Workspace 并执行连接流程。
+  - AppShell Header 将加入 breadcrumbs / tabs，帮助用户快速切换。
+- **实现计划**：在 `src/app/routes.tsx` 构建路由，并将现有 `App` 拆成 `HomePage`, `WorkspacePage`, `LayoutShell`。Terminal 逻辑继续由 Workspace 控制，Home 通过 store 读取 session/connection 统计即可。
+
+### 5.6 设计模式
 
 - **MVVM / Container + Presentational**：Hooks/Store 负责数据，UI 组件仅接收 props。
 - **Command 模式**：复杂操作封装为命令对象（准备支持 Undo/Redo）。
@@ -219,12 +231,13 @@ pub struct SessionManager {
 ```
 当前实现：
 
-1. `create_shell_session` 会根据连接协议选择：
-   - `ssh`/`sftp` → 直接调用系统 `ssh user@host -p PORT`，暂时沿用用户的 SSH Agent/配置；
-   - 其它协议或无连接 → 启动 `/bin/sh -i` 或 `cmd /K`，作为本地 shell 占位。
-2. `session-data` 事件实时推送 stdout/stderr，前端按 session id 过滤写入 xterm；
-3. `send_session_input` 将输入写入 stdin，`close_shell_session` 负责清理；
-4. 后续可替换为基于 `ssh2`/`tokio` 的实现，支持更丰富的 SSH/SFTP 能力。
+1. `create_shell_session`：
+   - `ssh`/`sftp` → 走 `ssh2` crate 建立 TCP + SSH session。握手阶段保持阻塞，之后克隆 TCP 并切换到底层 socket 非阻塞，配合自定义 `wait_for_ssh` 自动吞掉 `[Session(-37)] Would block`。
+   - 其它协议或无连接 → 启动 `/bin/sh -i`（Linux/macOS）或 `cmd /K`（Windows）作为本地 shell。
+2. `session-data`：SSH 通道读循环会将原始 chunk（非按行）推送给前端，因此提示符、渐进输出都能即时呈现。前端 `TerminalView` 直接 `write` 这些 chunk。
+3. `send_session_input`：SessionManager 内部为每个 SSH 会话维持 `crossbeam_channel::Sender<SessionInput>`。写入循环同样重试 `WouldBlock` 并在用户主动关闭时调用 `channel.close + wait_close`，确保远端优雅退出。
+4. 认证：优先尝试密码（若调用方提供），否则自动遍历 `ssh-agent` identities。失败会通过 `session-data` stderr 流推送“SSH 认证失败”提示。
+5. 未来扩展：在此基础上增加 `sftp` 子会话、会话标签、端口转发等能力。
 
 ### 6.3 存储与迁移
 
@@ -358,12 +371,14 @@ interface SyncAdapter {
 
 ## 12. 现状与下一步
 
-- ✅ 已完成：Tauri + React + Mantine 工程初始化，AppShell + Acrylic Terminal 示例 UI。
-- ☐ 待办：Mantine 主题细节、ESLint/Prettier 配置、状态管理（Zustand）、xterm.js 集成、Rust 模块脚手架、同步适配层。
-- 后续优先级：
-  1. 搭建连接/会话 Store，与 Tauri 命令衔接。
-  2. Rust 端 `ConnectionService` + SQLite Schema。
-  3. Tauri ↔ React 事件管道（session-data、sync-progress）。
-  4. 多端同步 MVP（加密 conf 导入导出 + 存储适配器 API）。
+- ✅ 已完成：Tauri + React + Mantine 工程初始化；xterm.js 集成并支持 chunk 级写入；Rust SessionManager 切换为 ssh2，实现非阻塞读写与 `ssh-agent`/密码认证；前端 Terminal 输入/输出链路对齐真实终端体验。
+- ☐ 进行中：
+  1. Mantine 主题与 Store（Zustand/TanStack Query）落地（目前仍在临时 hooks 中）。
+  2. 多页面导航（Home/Workspace/Connections），确保首页不会触发自动连接/密码弹窗。
+  3. 同步与凭据管理 UI，完善导入/导出流程与 Keychain 对接。
+- ☐ 待启动：
+  1. Rust 端 `ConnectionService` 更多单测、`session` 模块 SFTP 能力。
+  2. 多端同步 MVP（加密 conf 导入导出 + 适配器接口）。
+  3. Terminal 多 session 标签与分屏。
 
 本文档会随着 TODO 完成持续更新，可作为新成员快速上手的入口资料。
